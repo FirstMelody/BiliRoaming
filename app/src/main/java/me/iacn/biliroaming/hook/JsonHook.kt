@@ -39,6 +39,8 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val brandSplashDataClass =
             "tv.danmaku.bili.ui.splash.brand.BrandSplashData".findClassOrNull(mClassLoader)
                 ?: "tv.danmaku.bili.ui.splash.brand.model.BrandSplashData".findClassOrNull(mClassLoader)
+        val eventSplashDataClass =
+            "tv.danmaku.bili.ui.splash.event.EventSplashData".findClassOrNull(mClassLoader)
         val eventEntranceClass =
             "tv.danmaku.bili.ui.main.event.model.EventEntranceModel".findClassOrNull(mClassLoader)
         val searchRanksClass = "com.bilibili.search.api.SearchRanks".findClassOrNull(mClassLoader)
@@ -81,6 +83,10 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             .from(mClassLoader)
         val channelItemClass = "com.bilibili.lib.sharewrapper.online.api.ShareChannels\$ChannelItem"
             .from(mClassLoader)
+
+        if (sPrefs.getBoolean("purify_splash", false) && hidden) {
+            eventSplashDataClass?.hookMethod("isValid") { false }
+        }
 
         instance.fastJsonClass?.hookMethod(
             instance.fastJsonParse(),
@@ -309,6 +315,13 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 ) {
                     result.getObjectFieldOrNullAs<MutableList<Any>>("brandList")?.clear()
                     result.getObjectFieldOrNullAs<MutableList<Any>>("showList")?.clear()
+                }
+                eventSplashDataClass -> if (sPrefs.getBoolean("purify_splash", false) &&
+                    sPrefs.getBoolean("hidden", false)
+                ) {
+                    result.setObjectField("resources", null)
+                    result.setObjectField("elements", null)
+                    result.setIntField("showTimes", 0)
                 }
                 eventEntranceClass -> if (sPrefs.getBoolean("purify_game", false) &&
                     sPrefs.getBoolean("hidden", false)

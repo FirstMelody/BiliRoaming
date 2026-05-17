@@ -1,6 +1,8 @@
 package me.iacn.biliroaming.hook
 
 import android.net.Uri
+import android.os.Looper
+import android.os.StrictMode
 import me.iacn.biliroaming.BiliBiliPackage.Companion.instance
 import me.iacn.biliroaming.utils.Log
 import me.iacn.biliroaming.utils.bv2av
@@ -10,19 +12,72 @@ import me.iacn.biliroaming.utils.sPrefs
 import me.iacn.biliroaming.utils.setObjectField
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 
 class ShareHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private val contentUrlPattern = Regex("""[\s\S]*(https?://(?:bili2233\.cn|b23\.tv)/\S*)$""")
+    private val shortUrlCache = ConcurrentHashMap<String, String>()
+
+    private fun String.isShortShareUrl() =
+        startsWith("https://bili2233.cn") || startsWith("http://bili2233.cn") ||
+            startsWith("https://b23.tv") || startsWith("http://b23.tv")
+
+    private fun String.normalizeUrl() = runCatching {
+        Uri.parse(this).buildUpon().query(null).build().toString()
+    }.getOrDefault(this)
 
     private fun String.resolveB23URL(): String {
-        val conn = URL(this).openConnection() as HttpURLConnection
-        conn.requestMethod = "GET"
-        conn.instanceFollowRedirects = false
-        conn.connect()
-        if (conn.responseCode == HttpURLConnection.HTTP_MOVED_TEMP) {
-            return conn.getHeaderField("Location")
+        val normalized = normalizeUrl()
+        if (!normalized.isShortShareUrl()) return normalized
+        shortUrlCache[normalized]?.let { return it }
+
+        val oldPolicy = if (Looper.myLooper() == Looper.getMainLooper()) {
+            StrictMode.getThreadPolicy()
+        } else {
+            null
         }
-        return this
+        var conn: HttpURLConnection? = null
+        return try {
+            if (oldPolicy != null) {
+                StrictMode.setThreadPolicy(
+                    StrictMode.ThreadPolicy.Builder(oldPolicy)
+                        .permitNetwork()
+                        .build()
+                )
+            }
+            conn = (URL(normalized).openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                instanceFollowRedirects = false
+                connectTimeout = 2000
+                readTimeout = 2000
+                connect()
+            }
+            val redirected = when (conn.responseCode) {
+                HttpURLConnection.HTTP_MOVED_PERM,
+                HttpURLConnection.HTTP_MOVED_TEMP,
+                HttpURLConnection.HTTP_SEE_OTHER,
+                307,
+                308 -> conn.getHeaderField("Location")
+                    ?.let { URL(URL(normalized), it).toString().normalizeUrl() }
+                else -> null
+            } ?: normalized
+            shortUrlCache[normalized] = redirected
+            redirected
+        } catch (e: Throwable) {
+            Log.d(e)
+            normalized
+        } finally {
+            conn?.disconnect()
+            if (oldPolicy != null) {
+                StrictMode.setThreadPolicy(oldPolicy)
+            }
+        }
+    }
+
+    private fun purifyShareUrl(url: String, transformAv: Boolean): String {
+        val normalized = url.normalizeUrl()
+        val resolved = if (normalized.isShortShareUrl()) normalized.resolveB23URL() else normalized
+        return if (resolved.isShortShareUrl()) normalized else transformUrl(resolved, transformAv)
     }
 
     private fun transformUrl(url: String, transformAv: Boolean): String {
@@ -67,10 +122,9 @@ class ShareHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                 hookMethod("getLink") { chain ->
                     val result = chain.proceed()
                     (result as? String)?.takeIf {
-                        it.startsWith("https://bili2233.cn") || it.startsWith("http://bili2233.cn") || it.startsWith("https://b23.tv") || it.startsWith("http://b23.tv")
+                        it.isShortShareUrl()
                     }?.let {
-                        val targetUrl = Uri.parse(it).buildUpon().query("").build().toString()
-                        targetUrl.resolveB23URL().also { r -> chain.thisObject.setObjectField("link", r) }
+                        it.resolveB23URL().also { r -> chain.thisObject.setObjectField("link", r) }
                     } ?: result
                 }
                 hookMethod("getContent") { chain ->
@@ -80,13 +134,10 @@ class ShareHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         contentUrlPattern.matchEntire(it)?.groups?.get(1)?.value
                     }
                     if (contentUrl != null) {
-                        val resolvedUrl = (chain.thisObject!!.getObjectField("link")?.let { it as String } ?: contentUrl)
-                            .let {
-                                if (it.startsWith("https://bili2233.cn") || it.startsWith("http://bili2233.cn") || it.startsWith("https://b23.tv") || it.startsWith("http://b23.tv"))
-                                    it.resolveB23URL()
-                                else it
-                            }
-                        content.replace(contentUrl, transformUrl(resolvedUrl, miniProgramEnabled)).also { r ->
+                        val purifiedUrl =
+                            (chain.thisObject!!.getObjectField("link")?.let { it as String } ?: contentUrl)
+                                .let { purifyShareUrl(it, miniProgramEnabled) }
+                        content.replace(contentUrl, purifiedUrl).also { r ->
                             chain.thisObject.setObjectField("content", r)
                         }
                     } else result
