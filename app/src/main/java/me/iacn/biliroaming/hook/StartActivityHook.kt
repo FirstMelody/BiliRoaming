@@ -9,6 +9,7 @@ import android.os.Bundle
 import me.iacn.biliroaming.BiliBiliPackage
 import me.iacn.biliroaming.BiliBiliPackage.Companion.instance
 import me.iacn.biliroaming.utils.Log
+import me.iacn.biliroaming.utils.findClassOrNull
 import me.iacn.biliroaming.utils.hookAllMethods
 import me.iacn.biliroaming.utils.hookMethod
 import me.iacn.biliroaming.utils.packageName
@@ -17,6 +18,16 @@ import me.iacn.biliroaming.utils.toJSONObject
 import kotlin.math.floor
 
 class StartActivityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
+    private val splashAdActivities = setOf(
+        "tv.danmaku.bili.ui.splash.ad.page.HotSplashActivity",
+        "tv.danmaku.bili.splash.ad.page.HotSplashActivity",
+        "tv.danmaku.bili.ui.splash.ad.landingpage.SplashImmersiveVideoLandingActivityV2",
+        "tv.danmaku.bili.splash.ad.page.landingpage.SplashImmersiveVideoLandingActivityV3",
+        "tv.danmaku.bili.splash.shell.SplashShellActivity"
+    )
+    private val splashAdRoutes = setOf(
+        "bilibili://main/hot-splash"
+    )
 
     private fun fixIntentUri(original: Uri): Uri {
         val fixedUri = Uri.parse(original.toString().replace("bilibili://story/", "bilibili://united_video/")).buildUpon()
@@ -28,6 +39,31 @@ class StartActivityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         return fixedUri
     }
 
+    private fun shouldPurifySplash() =
+        sPrefs.getBoolean("purify_splash", false) && sPrefs.getBoolean("hidden", false)
+
+    private fun matchesSplashAdActivity(className: String?): Boolean {
+        if (className.isNullOrEmpty()) return false
+        return splashAdActivities.any { target ->
+            className == target || className.endsWith(target.removePrefix("tv.danmaku.bili"))
+        }
+    }
+
+    private fun isSplashAdIntent(intent: Intent): Boolean {
+        if (matchesSplashAdActivity(intent.component?.className)) {
+            return true
+        }
+        val dataString = intent.dataString ?: return false
+        return splashAdRoutes.any(dataString::startsWith)
+    }
+
+    private fun finishSplashActivity(activity: Activity, reason: String) {
+        if (activity.isFinishing) return
+        Log.d("$reason: ${activity.javaClass.name}, data=${activity.intent?.dataString}")
+        activity.overridePendingTransition(0, 0)
+        activity.finish()
+    }
+
     override fun startHook() {
         "tv.danmaku.bili.ui.intent.IntentHandlerActivity".hookMethod(mClassLoader, "onCreate", Bundle::class.java) { chain ->
             val a = chain.thisObject as Activity
@@ -35,10 +71,34 @@ class StartActivityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             a.intent.data = data.buildUpon().encodedQuery(data.encodedQuery?.replace("&-Arouter=story", "")?.replace("&-Atype=story", "")).build()
             chain.proceed()
         }
+        splashAdActivities.asSequence()
+            .mapNotNull { it.findClassOrNull(mClassLoader) }
+            .distinct()
+            .forEach { splashAdActivity ->
+                splashAdActivity.hookAllMethods("onCreate") { chain ->
+                    val activity = chain.thisObject as Activity
+                    val result = chain.proceed()
+                    if (shouldPurifySplash()) {
+                        finishSplashActivity(activity, "finish splash ad activity")
+                    }
+                    result
+                }
+            }
         Instrumentation::class.java.hookAllMethods("execStartActivity") { chain ->
             val intent = chain.args[4] as? Intent ?: return@hookAllMethods chain.proceed()
-            val uri = intent.dataString ?: return@hookAllMethods chain.proceed()
-            if (sPrefs.getBoolean(
+            if (shouldPurifySplash() && isSplashAdIntent(intent)) {
+                (chain.args.getOrNull(3) as? Activity)
+                    ?.takeIf { matchesSplashAdActivity(it.javaClass.name) }
+                    ?.let { finishSplashActivity(it, "finish splash caller activity") }
+                Log.d(
+                    "block splash ad launch: component=${intent.component?.className}, " +
+                        "data=${intent.dataString}, caller=${chain.args.getOrNull(3)?.javaClass?.name}"
+                )
+                return@hookAllMethods null
+            }
+
+            val uri = intent.dataString
+            if (uri != null && sPrefs.getBoolean(
                     "replace_story_video",
                     false
                 ) && uri.startsWith("bilibili://story/")

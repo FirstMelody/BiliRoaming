@@ -2,6 +2,7 @@ package me.iacn.biliroaming.hook
 
 import me.iacn.biliroaming.BiliBiliPackage.Companion.instance
 import me.iacn.biliroaming.utils.*
+import java.lang.reflect.Modifier
 import java.lang.reflect.Type
 
 class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
@@ -25,9 +26,37 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             "tv.danmaku.bili.ui.main2.api.AccountMine".findClassOrNull(mClassLoader)
         val garbEntranceClass =
             "tv.danmaku.bili.ui.main2.api.AccountMine\$GarbEntrance".from(mClassLoader)
-        val splashClass = "tv.danmaku.bili.ui.splash.SplashData".findClassOrNull(mClassLoader)
-            ?: "tv.danmaku.bili.ui.splash.ad.model.SplashData".findClassOrNull(mClassLoader)
-        val splashShowClass = "tv.danmaku.bili.ui.splash.ad.model.SplashShowData".findClassOrNull(mClassLoader)
+        val kntrSplashHelperClass =
+            "kntr.srcs.app.splash.services.SplashApiHelperKt".findClassOrNull(mClassLoader)
+        val kntrSplashListResponseClass = "W21.x".findClassOrNull(mClassLoader)
+            ?: kntrSplashHelperClass?.declaredMethods?.firstOrNull {
+                it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0] == it.returnType &&
+                    it.returnType.name.startsWith("W")
+            }?.returnType
+        val kntrSplashOrderClass = "W21.a0".findClassOrNull(mClassLoader)
+            ?: kntrSplashHelperClass?.declaredMethods?.firstOrNull {
+                it.returnType == Boolean::class.javaPrimitiveType &&
+                    it.parameterTypes.size == 1 &&
+                    it.parameterTypes[0].name.startsWith("W")
+            }?.parameterTypes?.firstOrNull()
+        val splashDataClasses = setOfNotNull(
+            "tv.danmaku.bili.ui.splash.SplashData".findClassOrNull(mClassLoader),
+            "tv.danmaku.bili.ui.splash.ad.model.SplashData".findClassOrNull(mClassLoader),
+            "tv.danmaku.bili.splash.ad.model.SplashListResponse".findClassOrNull(mClassLoader),
+            kntrSplashListResponseClass,
+            "com.bapis.bilibili.app.splash.v1.SplashReply".findClassOrNull(mClassLoader)
+        )
+        val splashShowClasses = setOfNotNull(
+            "tv.danmaku.bili.ui.splash.ad.model.SplashShowData".findClassOrNull(mClassLoader),
+            "tv.danmaku.bili.splash.ad.model.SplashShowResponse".findClassOrNull(mClassLoader)
+        )
+        val splashPayloadClasses = splashDataClasses + splashShowClasses
+        val splashOrderClasses = setOfNotNull(
+            "tv.danmaku.bili.ui.splash.ad.model.Splash".findClassOrNull(mClassLoader),
+            "tv.danmaku.bili.splash.ad.model.SplashOrder".findClassOrNull(mClassLoader),
+            kntrSplashOrderClass
+        )
         val tabClass =
             "tv.danmaku.bili.ui.main2.resource.MainResourceManager\$Tab".findClassOrNull(
                 mClassLoader
@@ -36,11 +65,14 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             "tv.danmaku.bili.ui.main2.api.SearchDefaultWord".findClassOrNull(mClassLoader)
         val defaultKeywordClass =
             "com.bilibili.search.api.DefaultKeyword".findClassOrNull(mClassLoader)
-        val brandSplashDataClass =
-            "tv.danmaku.bili.ui.splash.brand.BrandSplashData".findClassOrNull(mClassLoader)
-                ?: "tv.danmaku.bili.ui.splash.brand.model.BrandSplashData".findClassOrNull(mClassLoader)
-        val eventSplashDataClass =
-            "tv.danmaku.bili.ui.splash.event.EventSplashData".findClassOrNull(mClassLoader)
+        val brandSplashDataClasses = setOfNotNull(
+            "tv.danmaku.bili.ui.splash.brand.BrandSplashData".findClassOrNull(mClassLoader),
+            "tv.danmaku.bili.ui.splash.brand.model.BrandSplashData".findClassOrNull(mClassLoader)
+        )
+        val eventSplashDataClasses = setOfNotNull(
+            "tv.danmaku.bili.ui.splash.event.EventSplashData".findClassOrNull(mClassLoader),
+            "tv.danmaku.bili.splash.event.EventSplashData".findClassOrNull(mClassLoader)
+        )
         val eventEntranceClass =
             "tv.danmaku.bili.ui.main.event.model.EventEntranceModel".findClassOrNull(mClassLoader)
         val searchRanksClass = "com.bilibili.search.api.SearchRanks".findClassOrNull(mClassLoader)
@@ -84,8 +116,133 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val channelItemClass = "com.bilibili.lib.sharewrapper.online.api.ShareChannels\$ChannelItem"
             .from(mClassLoader)
 
-        if (sPrefs.getBoolean("purify_splash", false) && hidden) {
-            eventSplashDataClass?.hookMethod("isValid") { false }
+        fun Set<Class<*>>.hasInstance(value: Any) = any { it.isInstance(value) }
+
+        fun purifySplashEnabled() =
+            sPrefs.getBoolean("purify_splash", false) && sPrefs.getBoolean("hidden", false)
+
+        fun Any.clearListField(field: String) {
+            runCatchingOrNull {
+                (getObjectFieldOrNull(field) as? MutableList<*>)?.clear()
+                    ?: setObjectField(field, arrayListOf<Any>())
+            }
+        }
+
+        fun Any.clearDeclaredListFields() {
+            javaClass.declaredFields
+                .filter {
+                    !Modifier.isStatic(it.modifiers) && List::class.java.isAssignableFrom(it.type)
+                }
+                .forEach { field ->
+                    runCatchingOrNull {
+                        field.isAccessible = true
+                        (field.get(this) as? MutableList<*>)?.clear()
+                            ?: field.set(this, arrayListOf<Any>())
+                    }
+                }
+        }
+
+        fun purifySplashLists(data: Any) {
+            listOf("splashList", "strategyList", "keepIds", "list_", "show_").forEach {
+                data.clearListField(it)
+            }
+            data.callMethodOrNull("clearList")
+            data.callMethodOrNull("clearShow")
+            data.clearDeclaredListFields()
+        }
+
+        fun purifyEventSplash(data: Any) {
+            data.runCatchingOrNull { setObjectField("resources", null) }
+            data.runCatchingOrNull { setObjectField("elements", null) }
+            data.runCatchingOrNull { setIntField("showTimes", 0) }
+        }
+
+        fun responseDataOrSelf(result: Any): Any? {
+            return if (instance.generalResponseClass?.isInstance(result) == true) {
+                result.getObjectFieldOrNull("data")
+            } else {
+                result
+            }
+        }
+
+        fun purifySplashPayload(result: Any?) {
+            if (!purifySplashEnabled() || result == null) return
+            val data = responseDataOrSelf(result) ?: return
+            when {
+                splashPayloadClasses.hasInstance(data) -> purifySplashLists(data)
+                eventSplashDataClasses.hasInstance(data) -> purifyEventSplash(data)
+            }
+        }
+
+        if (purifySplashEnabled()) {
+            eventSplashDataClasses.forEach {
+                it.hookMethod("isValid") { false }
+            }
+        }
+
+        instance.gson()?.let { gsonField ->
+            val gson = instance.gsonConverterClass?.getStaticObjectFieldOrNull(gsonField)
+            val fromJson = instance.gsonFromJson()
+            if (gson != null && fromJson != null) {
+                gson.javaClass.hookMethod(fromJson, String::class.java, Class::class.java) { chain ->
+                    val result = chain.proceed()
+                    purifySplashPayload(result)
+                    result
+                }
+            }
+        }
+
+        listOf(
+            "tv.danmaku.bili.ui.splash.ad.service.SplashServiceHelperKt",
+            "tv.danmaku.bili.ui.splash.ad.k",
+            "tv.danmaku.bili.splash.ad.services.SplashServiceHelperKt",
+            "tv.danmaku.bili.splash.ad.services.SplashListResponseKit",
+            "tv.danmaku.bili.splash.ad.services.h",
+            "tv.danmaku.bili.splash.ad.services.c",
+            "tv.danmaku.bili.splash.ad.services.j",
+            "tv.danmaku.bili.splash.ad.core.SplashUpdateComponentKt",
+            "kntr.srcs.app.splash.services.SplashApiHelperKt",
+            "kntr.srcs.app.splash.core.SplashUpdateComponentKt",
+            "kntr.srcs.app.splash.resmanager.SplashListConfigExtKt",
+            "com.bapis.bilibili.app.splash.v1.SplashMoss",
+            "com.bapis.bilibili.app.splash.v1.c\$d"
+        ).mapNotNull {
+            it.findClassOrNull(mClassLoader)
+        }.distinct().forEach { owner ->
+            owner.declaredMethods
+                .filter { method ->
+                    splashPayloadClasses.any { it == method.returnType } ||
+                        method.returnType == instance.generalResponseClass
+                }
+                .forEach { method ->
+                    method.isAccessible = true
+                    method.hookMethod { chain ->
+                        val result = chain.proceed()
+                        purifySplashPayload(result)
+                        result
+                    }
+                }
+        }
+
+        listOf(
+            "tv.danmaku.bili.ui.splash.ad.core.b",
+            "tv.danmaku.bili.splash.ad.core.SplashOrderSelectComponentKt",
+            "kntr.srcs.app.splash.services.SplashApiHelperKt",
+            "kntr.srcs.app.splash.core.c"
+        ).mapNotNull {
+            it.findClassOrNull(mClassLoader)
+        }.distinct().forEach { owner ->
+            owner.declaredMethods
+                .filter { method ->
+                    method.returnType == Boolean::class.javaPrimitiveType &&
+                        method.parameterTypes.any { type -> splashOrderClasses.any { it == type } }
+                }
+                .forEach { method ->
+                    method.isAccessible = true
+                    method.hookMethod { chain ->
+                        if (purifySplashEnabled()) false else chain.proceed()
+                    }
+                }
         }
 
         instance.fastJsonClass?.hookMethod(
@@ -100,6 +257,7 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             if (result.javaClass == instance.generalResponseClass) {
                 result = result.getObjectField("data") ?: return@hookMethod origResult
             }
+            purifySplashPayload(result)
 
             when (result.javaClass) {
                 tabResponseClass -> {
@@ -277,12 +435,6 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         }
                     }
                 }
-                splashClass, splashShowClass -> if (sPrefs.getBoolean("purify_splash", false) &&
-                    sPrefs.getBoolean("hidden", false)
-                ) {
-                    result.getObjectFieldOrNullAs<MutableList<*>>("splashList")?.clear()
-                    result.getObjectFieldOrNullAs<MutableList<*>>("strategyList")?.clear()
-                }
                 defaultWordClass, defaultKeywordClass, searchRanksClass, searchReferralClass, followingcardSearchRanksClass -> if (sPrefs.getBoolean(
                         "purify_search",
                         false
@@ -310,18 +462,11 @@ class JsonHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                         })
                     }
                 }
-                brandSplashDataClass -> if (sPrefs.getBoolean("custom_splash", false) ||
+                in brandSplashDataClasses -> if (sPrefs.getBoolean("custom_splash", false) ||
                     sPrefs.getBoolean("custom_splash_logo", false)
                 ) {
                     result.getObjectFieldOrNullAs<MutableList<Any>>("brandList")?.clear()
                     result.getObjectFieldOrNullAs<MutableList<Any>>("showList")?.clear()
-                }
-                eventSplashDataClass -> if (sPrefs.getBoolean("purify_splash", false) &&
-                    sPrefs.getBoolean("hidden", false)
-                ) {
-                    result.setObjectField("resources", null)
-                    result.setObjectField("elements", null)
-                    result.setIntField("showTimes", 0)
                 }
                 eventEntranceClass -> if (sPrefs.getBoolean("purify_game", false) &&
                     sPrefs.getBoolean("hidden", false)
