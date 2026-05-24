@@ -22,6 +22,7 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             "expected_qn"
         )
         private val LIVE_CODEC_QUALITY_QUERY_KEYS = listOf(
+            "h264_current_qn",
             "h265_current_qn",
             "av1_current_qn"
         )
@@ -108,12 +109,13 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
         instance.liveRTCSourceServiceImplClass?.hookAllMethods(instance.switchAutoMethod()) { chain ->
             val mode = chain.args[0] ?: return@hookAllMethods chain.proceed()
-            val enumMode = mode as? Enum<*>
-            if (enumMode?.ordinal == 2 || mode.toString().contains("AUTO", ignoreCase = true)) {
+            if (mode.isLiveAutoMode()) {
                 return@hookAllMethods null
             }
             chain.proceed()
         }
+        "com.bilibili.bililive.player.rtc.decider.StreamDecider".findClassOrNull(mClassLoader)
+            ?.hookLiveRTCModeSetters()
 
         instance.livePlayUrlSelectUtilClass?.hookMethod(
             instance.buildSelectorDataMethod(),
@@ -173,6 +175,37 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             debug { "newQn: $newQn" }
             chain.proceed()
         }
+    }
+
+    private fun Class<*>.hookLiveRTCModeSetters() {
+        val modeClass = instance.liveRTCSourceServiceImplClass
+            ?.declaredMethods
+            ?.firstOrNull { it.name == instance.switchAutoMethod() && it.parameterCount == 1 }
+            ?.parameterTypes
+            ?.firstOrNull()
+            ?: return
+        declaredMethods
+            .filter { method ->
+                method.returnType == Void.TYPE &&
+                        ((method.parameterCount == 1 && method.parameterTypes[0] == modeClass) ||
+                                (method.parameterCount == 2 && method.parameterTypes[0] == this && method.parameterTypes[1] == modeClass))
+            }
+            .forEach { method ->
+                method.isAccessible = true
+                method.hookMethod { chain ->
+                    val mode = chain.args.lastOrNull() ?: return@hookMethod chain.proceed()
+                    if (mode.isLiveAutoMode()) {
+                        return@hookMethod null
+                    }
+                    chain.proceed()
+                }
+            }
+    }
+
+    private fun Any.isLiveAutoMode(): Boolean {
+        val enumMode = this as? Enum<*>
+        val name = enumMode?.name ?: toString()
+        return enumMode?.ordinal?.let { it in 2..5 } == true || name.contains("AUTO", ignoreCase = true)
     }
 
     private fun String.isLivePlayInfoUrl(): Boolean {
