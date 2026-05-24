@@ -107,15 +107,25 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             chain.proceed(args)
         }
 
+        val liveRTCModeClass = "com.bilibili.bililive.source.Mode".findClassOrNull(mClassLoader)
+        "com.bilibili.bililive.source.ModeKt".findClassOrNull(mClassLoader)
+            ?.hookLiveRTCAutoModeChecks()
+
         instance.liveRTCSourceServiceImplClass?.hookAllMethods(instance.switchAutoMethod()) { chain ->
             val mode = chain.args[0] ?: return@hookAllMethods chain.proceed()
             if (mode.isLiveAutoMode()) {
-                return@hookAllMethods null
+                val args = chain.args.toTypedArray()
+                args[0] = mode.liveUserSelectMode() ?: liveRTCModeClass.liveUserSelectMode()
+                        ?: return@hookAllMethods null
+                return@hookAllMethods chain.proceed(args)
             }
             chain.proceed()
         }
-        "com.bilibili.bililive.player.rtc.decider.StreamDecider".findClassOrNull(mClassLoader)
-            ?.hookLiveRTCModeSetters()
+        "com.bilibili.bililive.player.rtc.decider.StreamDecider".findClassOrNull(mClassLoader)?.run {
+            hookLiveRTCModeSetters(liveRTCModeClass)
+            hookLiveRTCModeGetters(liveRTCModeClass)
+            hookLiveRTCQoeCallbacks()
+        }
 
         instance.livePlayUrlSelectUtilClass?.hookMethod(
             instance.buildSelectorDataMethod(),
@@ -177,8 +187,23 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         }
     }
 
-    private fun Class<*>.hookLiveRTCModeSetters() {
-        val modeClass = instance.liveRTCSourceServiceImplClass
+    private fun Class<*>.hookLiveRTCAutoModeChecks() {
+        declaredMethods
+            .filter { it.name == "isAutoMode" && it.parameterCount == 1 && it.returnType == Boolean::class.javaPrimitiveType }
+            .forEach { method ->
+                method.isAccessible = true
+                method.hookMethod { chain ->
+                    val mode = chain.args.firstOrNull()
+                    if (mode?.isLiveAutoMode() == true) {
+                        return@hookMethod false
+                    }
+                    chain.proceed()
+                }
+            }
+    }
+
+    private fun Class<*>.hookLiveRTCModeSetters(modeClass: Class<*>?) {
+        val actualModeClass = modeClass ?: instance.liveRTCSourceServiceImplClass
             ?.declaredMethods
             ?.firstOrNull { it.name == instance.switchAutoMethod() && it.parameterCount == 1 }
             ?.parameterTypes
@@ -187,18 +212,55 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         declaredMethods
             .filter { method ->
                 method.returnType == Void.TYPE &&
-                        ((method.parameterCount == 1 && method.parameterTypes[0] == modeClass) ||
-                                (method.parameterCount == 2 && method.parameterTypes[0] == this && method.parameterTypes[1] == modeClass))
+                        ((method.parameterCount == 1 && method.parameterTypes[0] == actualModeClass) ||
+                                (method.parameterCount == 2 && method.parameterTypes[0] == this && method.parameterTypes[1] == actualModeClass))
             }
             .forEach { method ->
                 method.isAccessible = true
                 method.hookMethod { chain ->
                     val mode = chain.args.lastOrNull() ?: return@hookMethod chain.proceed()
                     if (mode.isLiveAutoMode()) {
-                        return@hookMethod null
+                        val args = chain.args.toTypedArray()
+                        args[args.lastIndex] = mode.liveUserSelectMode()
+                            ?: actualModeClass.liveUserSelectMode()
+                                    ?: return@hookMethod null
+                        return@hookMethod chain.proceed(args)
                     }
                     chain.proceed()
                 }
+            }
+    }
+
+    private fun Class<*>.hookLiveRTCModeGetters(modeClass: Class<*>?) {
+        val actualModeClass = modeClass ?: return
+        declaredMethods
+            .filter { method -> method.parameterCount == 0 && method.returnType == actualModeClass }
+            .forEach { method ->
+                method.isAccessible = true
+                method.hookMethod { chain ->
+                    val mode = chain.proceed()
+                    if (mode?.isLiveAutoMode() == true) {
+                        return@hookMethod mode.liveUserSelectMode()
+                            ?: actualModeClass.liveUserSelectMode()
+                            ?: mode
+                    }
+                    mode
+                }
+            }
+    }
+
+    private fun Class<*>.hookLiveRTCQoeCallbacks() {
+        // QOE callback can write Mode.QOE_AUTO directly, bypassing the public mode setter.
+        declaredMethods
+            .filter { method ->
+                method.isStatic &&
+                        method.returnType == Unit::class.java &&
+                        method.parameterCount == 1 &&
+                        method.parameterTypes[0] == this
+            }
+            .forEach { method ->
+                method.isAccessible = true
+                method.hookMethod { Unit }
             }
     }
 
@@ -206,6 +268,13 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
         val enumMode = this as? Enum<*>
         val name = enumMode?.name ?: toString()
         return enumMode?.ordinal?.let { it in 2..5 } == true || name.contains("AUTO", ignoreCase = true)
+    }
+
+    private fun Any?.liveUserSelectMode(): Any? {
+        val modeClass = (this as? Enum<*>)?.declaringJavaClass ?: this as? Class<*> ?: return null
+        return modeClass.enumConstants?.firstOrNull {
+            (it as? Enum<*>)?.let { mode -> mode.name == "USER_SELECT" || mode.ordinal == 1 } == true
+        }
     }
 
     private fun String.isLivePlayInfoUrl(): Boolean {
