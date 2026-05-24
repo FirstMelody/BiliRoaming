@@ -26,6 +26,11 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             "h265_current_qn",
             "av1_current_qn"
         )
+        private val LIVE_CODEC_SESSION_QUERY_KEYS = listOf(
+            "h264_session",
+            "h265_session",
+            "av1_session"
+        )
         private val LIVE_SELECTOR_QUALITY_QUERY_KEYS =
             LIVE_QUALITY_QUERY_KEYS + LIVE_CODEC_QUALITY_QUERY_KEYS
     }
@@ -165,6 +170,8 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
                     removeIf = { name ->
                         name.startsWith("playurl")
                                 || name == "backup_urls"
+                                || name.endsWith("_backup_urls")
+                                || name in LIVE_CODEC_SESSION_QUERY_KEYS
                                 || name in LIVE_SELECTOR_QUALITY_QUERY_KEYS
                     },
                     append = append,
@@ -253,13 +260,15 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun Class<*>.hookLiveRTCQoeCallbacks() {
         // QOE callback can write Mode.QOE_AUTO directly, bypassing the public mode setter.
-        val methods = declaredMethods
+        val candidates = declaredMethods
             .filter { method ->
                 method.isStatic &&
                         method.returnType.name == "kotlin.Unit" &&
                         method.parameterCount == 1 &&
                         method.parameterTypes[0] == this
             }
+        val methods = candidates.filter { it.name == "F" }
+            .ifEmpty { candidates.singleOrNull()?.let(::listOf).orEmpty() }
         methods.forEach { method ->
                 method.isAccessible = true
                 method.hookMethod { Unit }
@@ -300,7 +309,7 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
     private fun findQuality(acceptQuality: JSONArray, expectQuality: Int): Int {
         val acceptQnList = acceptQuality.asSequence<Int>().filter { it > 0 }.sorted().toList()
         if (acceptQnList.isEmpty()) {
-            return expectQuality
+            return expectQuality.normalizedInitialLiveQuality()
         }
         val max = acceptQnList.max()
         val min = acceptQnList.min()
@@ -313,25 +322,25 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun findQualityOrDefault(acceptQuality: String?, expectQuality: Int): Int {
         if (acceptQuality.isNullOrBlank()) {
-            return expectQuality
+            return expectQuality.normalizedInitialLiveQuality()
         }
         return runCatching {
             findQuality(JSONArray(acceptQuality), expectQuality)
         }.getOrElse {
             debug { "invalid accept_quality: $acceptQuality" }
-            expectQuality
+            expectQuality.normalizedInitialLiveQuality()
         }
     }
 
     private fun findQualityOrDefault(acceptQuality: JSONArray?, expectQuality: Int): Int {
         if (acceptQuality == null || acceptQuality.length() == 0) {
-            return expectQuality
+            return expectQuality.normalizedInitialLiveQuality()
         }
         return runCatching {
             findQuality(acceptQuality, expectQuality)
         }.getOrElse {
             debug { "invalid accept_quality: $acceptQuality" }
-            expectQuality
+            expectQuality.normalizedInitialLiveQuality()
         }
     }
 
