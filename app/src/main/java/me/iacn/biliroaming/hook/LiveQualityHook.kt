@@ -59,7 +59,7 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             debug { "oldHttpUrl: $url" }
 
             val uri = Uri.parse(httpUrl.toString())
-            val expectQn = newQn.ifEmpty { liveQuality.toString() }
+            val expectQn = newQn.ifEmpty { liveQuality.normalizedInitialLiveQuality().toString() }
             if (uri.getQueryParameter("qn") != expectQn) {
                 val newHttpUrl = instance.httpUrlClass?.callStaticMethod(
                     instance.httpUrlParseMethod(),
@@ -139,7 +139,8 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             debug { "originalLiveUrl: $originalUri" }
 
             if (originalUri.getQueryParameter("no_playurl") == "1") {
-                newQn = originalUri.firstLiveQualityParameter() ?: liveQuality.toString()
+                newQn = originalUri.firstLiveQualityParameter()
+                    ?: liveQuality.normalizedInitialLiveQuality().toString()
             } else {
                 newQn = findQualityOrDefault(
                     originalUri.getQueryParameter("accept_quality"),
@@ -209,13 +210,13 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             ?.parameterTypes
             ?.firstOrNull()
             ?: return
-        declaredMethods
+        val methods = declaredMethods
             .filter { method ->
                 method.returnType == Void.TYPE &&
                         ((method.parameterCount == 1 && method.parameterTypes[0] == actualModeClass) ||
                                 (method.parameterCount == 2 && method.parameterTypes[0] == this && method.parameterTypes[1] == actualModeClass))
             }
-            .forEach { method ->
+        methods.forEach { method ->
                 method.isAccessible = true
                 method.hookMethod { chain ->
                     val mode = chain.args.lastOrNull() ?: return@hookMethod chain.proceed()
@@ -233,16 +234,17 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun Class<*>.hookLiveRTCModeGetters(modeClass: Class<*>?) {
         val actualModeClass = modeClass ?: return
-        declaredMethods
+        val methods = declaredMethods
             .filter { method -> method.parameterCount == 0 && method.returnType == actualModeClass }
-            .forEach { method ->
+        methods.forEach { method ->
                 method.isAccessible = true
                 method.hookMethod { chain ->
                     val mode = chain.proceed()
                     if (mode?.isLiveAutoMode() == true) {
-                        return@hookMethod mode.liveUserSelectMode()
+                        val replacement = mode.liveUserSelectMode()
                             ?: actualModeClass.liveUserSelectMode()
                             ?: mode
+                        return@hookMethod replacement
                     }
                     mode
                 }
@@ -251,14 +253,14 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
 
     private fun Class<*>.hookLiveRTCQoeCallbacks() {
         // QOE callback can write Mode.QOE_AUTO directly, bypassing the public mode setter.
-        declaredMethods
+        val methods = declaredMethods
             .filter { method ->
                 method.isStatic &&
-                        method.returnType == Unit::class.java &&
+                        method.returnType.name == "kotlin.Unit" &&
                         method.parameterCount == 1 &&
                         method.parameterTypes[0] == this
             }
-            .forEach { method ->
+        methods.forEach { method ->
                 method.isAccessible = true
                 method.hookMethod { Unit }
             }
@@ -331,6 +333,10 @@ class LiveQualityHook(classLoader: ClassLoader) : BaseHook(classLoader) {
             debug { "invalid accept_quality: $acceptQuality" }
             expectQuality
         }
+    }
+
+    private fun Int.normalizedInitialLiveQuality(): Int {
+        return if (this > 10000) 10000 else this
     }
 
     private fun Uri.withLiveQuality(qn: String): Uri {
